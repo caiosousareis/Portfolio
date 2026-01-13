@@ -1,0 +1,643 @@
+---
+title: "Prova POF -- Seleção IPEA [Candidato: Caio Sousa dos Reis Silva]"
+output:
+  html_document:
+    mathjax: default
+    toc: true
+    toc_depth: 1
+    number_sections: false
+    df_print: paged
+---
+
+# Enunciado
+
+Usando os microdados da POF 2018, analise a distribuição da renda do trabalho e do consumo total nas cinco grandes regiões do Brasil. Em seguida, construa a variável de taxa de consumo (consumo total dividido pela renda total) e estude como essa taxa varia ao longo da distribuição de renda.
+
+## Tarefas
+
+- (Tarefa 1)Calcule e apresente a distribuição da renda do trabalho em cada região (Norte, Nordeste, Sudeste, Sul, Centro-Oeste).
+- (Tarefa 2)Calcule e apresente a distribuição do consumo total em cada região (Norte, Nordeste, Sudeste, Sul, Centro-Oeste).
+- (Tarefa 3)Para cada família, construa `taxa_consumo = consumo_total / renda_total` e plote a distribuição de `taxa_consumo` por percentis de `renda_total`.
+- (Tarefa 4)Repita o gráfico anterior para famílias cuja pessoa mais velha tem menos de 50 anos.
+- (Tarefa 5)Repita o gráfico anterior para famílias cuja pessoa mais velha tem 65 anos ou mais.
+
+# Setup do projeto POF 2017-2018
+
+Este bloco (*setup*) prepara o ambiente do R para trabalhar com os microdados da POF 2017–2018. Esses dados são fornecidos em **formato de largura fixa (FWF)**: cada linha é um registro e cada variável fica em uma **posição fixa**, com um **número de caracteres pré-definido**. Por isso, para ler corretamente as colunas, é necessário informar um **layout** (as posições e larguras de cada variável), isso ficará mais claro no bloco construção de base (build base)
+
+A unidade de análise adotada é a **Unidade de Consumo (UC)**. Na POF, o **domicílio** é o “endereço” pesquisado, mas dentro do mesmo domicílio podem existir **mais de um orçamento**. A **(UC)** representa justamente o **grupo de pessoas que compartilha orçamento e decisões de consumo**, funcionando como um “núcleo econômico”. Assim, um domicílio pode ter **uma única UC** (todos compartilham o orçamento) ou **várias UCs** (grupos com orçamentos separados no mesmo endereço).
+
+Essa escolha é importante porque renda e despesas aparecem em arquivos diferentes e em níveis distintos. Ao consolidar tudo no nível da **UC**, o código consegue construir medidas comparáveis de **renda total**, **renda do trabalho** e **consumo total** para o **mesmo núcleo de orçamento**, evitando misturar pessoas do mesmo domicílio com padrões econômicos distintos.
+
+Por fim, a POF é uma **pesquisa amostral**. Isso significa que cada UC observada representa várias UCs na população. Portanto, o uso de **pesos amostrais** é necessário para que tabelas e gráficos reflitam o Brasil como um todo, aumentando a representatividade das estimativas. Existem ferramentas para avaliar a incerteza e os limites dessas inferências, mas elas não serão utilizadas neste exercício.
+
+
+### Fonte dos microdados
+
+Os arquivos `.txt` utilizados são os microdados oficiais da POF 2017-2018 disponibilizados pelo IBGE. O download é feito na página da pesquisa, na seção **Dados**:
+
+https://www.ibge.gov.br/estatisticas/sociais/populacao/24786-pesquisa-de-orcamentos-familiares-2.html?edicao=25578&t=microdados
+
+### Opções globais
+
+- `knitr::opts_knit$set(encoding = "UTF-8")` define UTF-8 como padrão na hora de “renderizar” o R Markdown, reduzindo a chance de aparecerem caracteres quebrados em palavras com acento no HTML.
+
+### Bibliotecas utilizadas
+
+- `srvyr`: Principal pacote que vamos usar, foi construido para trabalhar com pesquisa amostral (pesos, estratos e UPA) de um jeito mais simples, porque a sintaxe é parecida com dplyr e os resultados “conversam” bem com fluxos de visualização (por exemplo, tabelas resumidas que vão direto para o ggplot2). Internamente, `srvyr` é uma camada construída sobre o pacote `survey`, que é o motor estatístico tradicional para desenho amostral complexo. Aqui, opta-se por `srvyr` por praticidade, mantendo a consistência metodológica com `srvyr`.
+- `readr`: leitura eficiente de arquivos FWF via `read_fwf()` e definição de posições com `fwf_positions()`. Isso é central porque os microdados vêm como texto de largura fixa.
+- `dplyr`: transformação e agregação de dados para construir variáveis no nível UC, com `filter`, `mutate`, `group_by` e `summarise`.
+- `ggplot2`: visualização de distribuições por grupos (região, percentis, faixas etárias).
+
+### Estrutura de diretórios e validação de arquivos
+
+O script assume que os arquivos descompactados do dowload `Dados_20230713.zip` fora colocados na pasta `Dados Primarios/` dentro do diretório de trabalho (`getwd()`) o qual o codigo vai ser rodado.  
+Deixei o `stopifnot(file.exists(...))` no codigo para verificar se todos os arquivos necessários existem na pasta indicada. Se algum estiver faltando, o R interrompe a execução imediatamente e sinaliza o problema, evitando que o código rode com dados incompletos e gere resultados incorretos.
+
+Para ler corretamente um arquivo FWF, é necessário fornecer um **layout**, e vamos conseguir esses layouts através do arquivo **Dicionários de váriaveis.xls** que será encontrado dentro da pasta **Documentação** que esta no mesmo link mostrado no inicio do texto, no codigo vamos puxar esse arquivo colocando a pasta Documentação no mesmo diretorio do codigo.
+
+A estratégia é construir uma base no nível **UC** contendo: grande região, renda total, renda do trabalho, consumo total, idade máxima na UC, peso amostral e percentil ponderado de renda.
+
+No arquivo `DOMICILIO.txt` vou tirar as variaveis
+
+- `UF`, `ESTRATO_POF`, `COD_UPA`, `NUM_DOM`: chaves estruturais para junções com UC e demais registros.
+- `TIPO_SITUACAO_REG`: classifica urbano/rural, útil para estratificação territorial quando necessário.
+
+No arquivo `MORADOR.txt` vou tirar as variaveis
+
+- `NUM_UC`: identifica a unidade de consumo dentro do domicílio.
+- `V0403`: idade em anos, usada para construir `idade_max` (idade da pessoa mais velha na UC), que define os subgrupos das Tarefas 4 e 5.
+- `RENDA_TOTAL`: renda total associada à UC (frequentemente replicada por morador, exigindo agregação no nível UC).
+- `PESO_FINAL`: peso amostral usado como peso de UC.
+
+Construção de medidas no nível UC a partir dos indivíduos.
+
+No arquivo `RENDIMENTO_TRABALHO.txt` vou tirar as variaveis
+
+- `V8500_DEFLA`: valor deflacionado do rendimento do trabalho.
+- `FATOR_ANUALIZACAO`: converte o registro para medida anualizada.
+
+Como boa pratica vou usar:
+- `renda_trabalho_mensal_uc = sum((V8500_DEFLA * FATOR_ANUALIZACAO) / 12)` no nível UC.
+
+Nos arquivos `DESPESA_COLETIVA.txt`, `DESPESA_INDIVIDUAL.txt`, `CADERNETA_COLETIVA.txt` vou tirar as variaveis abaixo
+
+- `V8000_DEFLA`: valor deflacionado da despesa.
+- `FATOR_ANUALIZACAO`: converte a despesa para base anualizada.
+
+PAra construir os componentes abaixo:
+- `consumo_mensal_componente = (V8000_DEFLA * FATOR_ANUALIZACAO) / 12`, agregando por UC.
+- `consumo_total_uc = soma dos três componentes mensalizados` no nível UC.
+
+Para juntar informações corretamente, o código usa um conjunto de identificadores que funcionam como “endereço + etiqueta do grupo”:
+
+- **Chaves do domicílio**: identificam o mesmo domicílio em qualquer arquivo e utilizamos essas chaves para trazer a região do domicilio  
+ Com : `UF`, `ESTRATO_POF`, `COD_UPA`, `NUM_DOM`.
+
+- **Chave da UC dentro do domicílio**: identifica qual grupo de consumo está sendo analisado dentro daquele domicílio.  
+  A variável central é `NUM_UC`.
+
+Assim, quando o código combina arquivos diferentes, ele faz a junção por:
+`UF + ESTRATO_POF + COD_UPA + NUM_DOM + NUM_UC`.
+
+Primeiro garantimos que estamos falando do **mesmo endereço** (domicílio) e depois garantimos que estamos falando do **mesmo grupo de orçamento** dentro daquele endereço (UC). Isso é o que permite calcular, para a mesma UC, a renda total, a renda do trabalho, o consumo total e a idade da pessoa mais velha, que são usados nas tarefas do exercício.
+
+Observação metodológica: se, em uma etapa futura, o consumo total for redefinido como apenas um subconjunto de componentes, algum desses arquivos pode se tornar dispensável. No desenho atual, os três registros são mantidos para obter uma medida mais abrangente de consumo total mensal.
+
+### Funções auxiliares do setup
+
+- `uf_to_regiao()`: recodifica UF (2 dígitos IBGE) em grande região, necessária para estratificar as distribuições das Tarefas 1 e 2.
+- `weighted_percentile_rank()`: constrói percentis ponderados (1 a 100) para a renda total, usados para analisar `taxa_consumo` ao longo da distribuição de renda (Tarefas 3 a 5).
+
+
+```{r setup, message=FALSE, warning=FALSE}
+options(scipen = 999) #Tirar notações cientificas
+knitr::opts_knit$set(encoding = "UTF-8")
+need <- c("readr","dplyr","srvyr","ggplot2","readxl")
+ok <- vapply(need, requireNamespace, quietly = TRUE, FUN.VALUE = logical(1))
+if (!all(ok)) stop("Pacotes faltando: ", paste(need[!ok], collapse = ", "))
+
+library(readr)
+library(dplyr)
+library(srvyr)
+library(ggplot2)
+library(readxl)
+
+
+# localizar pasta Documentação e o dicionário ---
+root    <- getwd()
+data_dir <- file.path(root, "Dados Primarios")
+doc_dir  <- file.path(root, "Documentação")
+stopifnot(
+  dir.exists(data_dir),
+  dir.exists(doc_dir)
+)
+
+# Procura o dicionário pelo nome
+dic_candidates <- list.files(
+  path = doc_dir,
+  pattern = "(?i)Dicion.*vári.*\\.xls[x]?$",
+  full.names = TRUE
+)
+
+if (length(dic_candidates) == 0) {
+  stop(
+    "Não encontrei o dicionário na pasta 'Documentação'. ",
+    "Arquivos .xls/.xlsx disponíveis: ",
+    paste(list.files(doc_dir, pattern = "(?i)\\.xls[x]?$", full.names = FALSE), collapse = " | ")
+  )
+}
+
+if (length(dic_candidates) > 1) {
+  stop(
+    "Encontrei mais de um possível dicionário. Renomeie para ficar único ou escolha manualmente.\n",
+    paste(dic_candidates, collapse = "\n")
+  )
+}
+
+dic_path <- dic_candidates[1]
+
+
+# Arquivos de dados
+path_dom <- file.path(data_dir, "DOMICILIO.txt")
+path_mor <- file.path(data_dir, "MORADOR.txt")
+path_rt  <- file.path(data_dir, "RENDIMENTO_TRABALHO.txt")
+path_dc  <- file.path(data_dir, "DESPESA_COLETIVA.txt")
+path_di  <- file.path(data_dir, "DESPESA_INDIVIDUAL.txt")
+path_cc  <- file.path(data_dir, "CADERNETA_COLETIVA.txt")
+stopifnot(
+  file.exists(dic_path),
+  file.exists(path_dom),
+  file.exists(path_mor),
+  file.exists(path_rt),
+  file.exists(path_dc),
+  file.exists(path_di),
+  file.exists(path_cc)
+)
+
+num_types <- readr::cols(.default = readr::col_double())
+
+uf_to_regiao <- function(uf) {
+  dplyr::case_when(
+    uf %in% c(11,12,13,14,15,16,17) ~ "Norte",
+    uf %in% c(21,22,23,24,25,26,27,28,29) ~ "Nordeste",
+    uf %in% c(31,32,33,35) ~ "Sudeste",
+    uf %in% c(41,42,43) ~ "Sul",
+    uf %in% c(50,51,52,53) ~ "Centro-Oeste",
+    TRUE ~ NA_character_
+  )
+}
+
+weighted_percentile_rank <- function(x, w) {
+  ok <- is.finite(x) & is.finite(w) & w > 0
+  x2 <- x[ok]; w2 <- w[ok]
+  ord <- order(x2)
+  x2 <- x2[ord]; w2 <- w2[ord]
+  cw <- cumsum(w2) / sum(w2)
+  p <- pmin(100, pmax(1, floor(100 * cw) + 1))
+  out <- rep(NA_integer_, length(x))
+  out[which(ok)[ord]] <- p
+  out
+}
+
+
+```
+
+# Construção das bases para as tarefas 
+
+Nesse segundo chunk vamos preparar o ambiente do R para construir uma base no nível da Unidade de Consumo (UC).
+
+O layout não é inferido no código, extraimos diretamente do dicionário conforme explicado acima, lendo via `readxl`. A partir desse dicionário, o build_base monta as posições das colunas e lê apenas as variáveis necessárias para o exercício, em vez de carregar todos os campos disponíveis.
+
+Para reconhecer a mesma UC em arquivos distintos, o código utiliza um conjunto de chaves que identifica univocamente cada unidade observada: `UF`, `ESTRATO_POF`, `COD_UPA`, `NUM_DOM` e `NUM_UC`. No build_base, o arquivo `DOMICILIO.txt` é usado para associar cada observação à grande região, recodificando a UF com a função `uf_to_regiao()`. O arquivo `MORADOR.txt`, embora esteja no nível de indivíduo, contém `NUM_UC`, permitindo agregar as informações no nível da UC e obter a renda total da UC, a idade máxima (idade da pessoa mais velha na UC) e o peso amostral final.
+
+A renda do trabalho mensal no nível UC é construída a partir de `RENDIMENTO_TRABALHO.txt` usando valores deflacionados e um fator de anualização. O script filtra registros válidos, transforma os valores para base mensal e agrega por UC com soma. O consumo total mensal é construído mensalizando e somando três fontes de despesa (`DESPESA_COLETIVA`, `DESPESA_INDIVIDUAL` e `CADERNETA_COLETIVA`), sempre agregando por UC. Depois, o build_base junta os componentes em uma base final `base_uc`, substitui ausências por zero quando apropriado (por exemplo, UCs sem registro de renda do trabalho naquele arquivo), calcula a taxa de consumo quando necessário e cria o percentil ponderado de renda total (`p_renda`) com a função `weighted_percentile_rank()`, usando `peso_final`. Essa base `base_uc` é a base analítica usada nas Tarefas 1 a 5, permitindo comparar distribuições por região e analisar resultados ao longo da distribuição de renda.
+
+Por fim, o script cria um objeto `des_uc` com o desenho amostral (estratos e UPA) via `srvyr`. Esse objeto é útil quando se quer calcular medidas com incerteza amostral, como erros padrão e intervalos de confiança. Mesmo que o exercício seja majoritariamente descritivo, manter o desenho amostral organizado é uma prática que facilita extensões inferenciais posteriores.
+
+---
+
+```{r build_base, message=FALSE, warning=FALSE}
+
+# 1) Layout 
+
+read_layout_dic <- function(dic_path, sheet) {
+  raw <- readxl::read_excel(dic_path, sheet = sheet, col_names = FALSE)
+
+  header_i <- which(apply(raw, 1, function(r) {
+    any(grepl("Posição Inicial", as.character(r), fixed = TRUE), na.rm = TRUE)
+  }))[1]
+
+  if (is.na(header_i)) stop("Cabeçalho com 'Posição Inicial' não encontrado na aba: ", sheet)
+
+  header <- as.character(unlist(raw[header_i, ], use.names = FALSE))
+  dat <- raw[(header_i + 1):nrow(raw), , drop = FALSE]
+  names(dat) <- header
+
+  if (!("Código da variável" %in% names(dat))) stop("Coluna 'Código da variável' não encontrada na aba: ", sheet)
+  if (!("Posição Inicial" %in% names(dat))) stop("Coluna 'Posição Inicial' não encontrada na aba: ", sheet)
+  if (!("Tamanho" %in% names(dat))) stop("Coluna 'Tamanho' não encontrada na aba: ", sheet)
+
+  dat %>%
+    filter(!is.na(`Código da variável`)) %>%
+    mutate(
+      `Código da variável` = trimws(as.character(`Código da variável`)),
+      `Posição Inicial`    = suppressWarnings(as.integer(`Posição Inicial`)),
+      Tamanho              = suppressWarnings(as.integer(Tamanho))
+    ) %>%
+    filter(is.finite(`Posição Inicial`), is.finite(Tamanho), Tamanho > 0)
+}
+
+fwf_pos_from_dic <- function(dic_path, sheet, keep_codes) {
+  lay <- read_layout_dic(dic_path, sheet) %>%
+    filter(`Código da variável` %in% keep_codes) %>%
+    distinct(`Código da variável`, `Posição Inicial`, Tamanho, .keep_all = TRUE) %>%
+    arrange(`Posição Inicial`)
+
+  missing <- setdiff(keep_codes, lay$`Código da variável`)
+  if (length(missing) > 0) {
+    stop("Na aba '", sheet, "' faltaram códigos no dicionário: ", paste(missing, collapse = ", "))
+  }
+
+  starts <- lay$`Posição Inicial`
+  ends   <- lay$`Posição Inicial` + lay$Tamanho - 1
+  readr::fwf_positions(start = starts, end = ends, col_names = lay$`Código da variável`)
+}
+
+read_fwf_min <- function(txt_path, dic_path, sheet, keep_codes) {
+  pos <- fwf_pos_from_dic(dic_path, sheet, keep_codes)
+  readr::read_fwf(
+    file = txt_path,
+    col_positions = pos,
+    col_types = num_types,
+    na = " ",
+    trim_ws = TRUE,
+    show_col_types = FALSE,
+    progress = FALSE
+  )
+}
+
+
+# DOMICÍLIO: apenas para região + chaves de merge
+dom_keep <- c("UF","ESTRATO_POF","COD_UPA","NUM_DOM")
+dom <- read_fwf_min(path_dom, dic_path, sheet = "Domicílio", keep_codes = dom_keep)
+
+# MORADOR: UC, idade_max, renda_total_uc, peso_final
+mor_keep <- c("UF","ESTRATO_POF","COD_UPA","NUM_DOM","NUM_UC","V0403","RENDA_TOTAL","PESO_FINAL")
+mor <- read_fwf_min(path_mor, dic_path, sheet = "Morador", keep_codes = mor_keep)
+
+# RENDIMENTO_TRABALHO: renda do trabalho mensal UC
+rt_keep <- c("UF","ESTRATO_POF","COD_UPA","NUM_DOM","NUM_UC","V8500_DEFLA","FATOR_ANUALIZACAO")
+rt <- read_fwf_min(path_rt, dic_path, sheet = "Rendimento do Trabalho", keep_codes = rt_keep)
+
+# DESPESAS: consumo total mensal UC
+d_keep <- c("UF","ESTRATO_POF","COD_UPA","NUM_DOM","NUM_UC","V8000_DEFLA","FATOR_ANUALIZACAO")
+dc <- read_fwf_min(path_dc, dic_path, sheet = "Despesa Coletiva", keep_codes = d_keep)
+di <- read_fwf_min(path_di, dic_path, sheet = "Despesa Individual", keep_codes = d_keep)
+cc <- read_fwf_min(path_cc, dic_path, sheet = "Caderneta Coletiva", keep_codes = d_keep)
+
+
+# 3) Região (nível domicílio)
+
+dom_base <- dom %>%
+  mutate(regiao = uf_to_regiao(UF)) %>%
+  filter(!is.na(regiao)) %>%
+  select(UF, ESTRATO_POF, COD_UPA, NUM_DOM, regiao) %>%
+  distinct()
+
+# 4) Variáveis no nível UC (renda total, idade_max, peso, renda_trabalho, consumo_total)
+
+
+mor_uc <- mor %>%
+  group_by(UF, ESTRATO_POF, COD_UPA, NUM_DOM, NUM_UC) %>%
+  summarise(
+    renda_total_uc = first(RENDA_TOTAL),
+    idade_max      = suppressWarnings(max(V0403, na.rm = TRUE)),
+    peso_final     = first(PESO_FINAL),
+    .groups = "drop"
+  ) %>%
+  mutate(idade_max = ifelse(is.infinite(idade_max), NA_real_, idade_max))
+
+rt_uc <- rt %>%
+  filter(is.finite(V8500_DEFLA), is.finite(FATOR_ANUALIZACAO), FATOR_ANUALIZACAO > 0) %>%
+  mutate(valor_mensal = (V8500_DEFLA * FATOR_ANUALIZACAO) / 12) %>%
+  group_by(UF, ESTRATO_POF, COD_UPA, NUM_DOM, NUM_UC) %>%
+  summarise(renda_trabalho_uc = sum(valor_mensal, na.rm = TRUE), .groups = "drop")
+
+mensaliza_uc <- function(df) {
+  df %>%
+    filter(is.finite(V8000_DEFLA), is.finite(FATOR_ANUALIZACAO), FATOR_ANUALIZACAO > 0) %>%
+    mutate(valor_mensal = (V8000_DEFLA * FATOR_ANUALIZACAO) / 12) %>%
+    group_by(UF, ESTRATO_POF, COD_UPA, NUM_DOM, NUM_UC) %>%
+    summarise(consumo_mensal = sum(valor_mensal, na.rm = TRUE), .groups = "drop")
+}
+
+cons_uc <- mensaliza_uc(dc) %>%
+  rename(consumo_mensal_dc = consumo_mensal) %>%
+  full_join(mensaliza_uc(di) %>% rename(consumo_mensal_di = consumo_mensal),
+            by = c("UF","ESTRATO_POF","COD_UPA","NUM_DOM","NUM_UC")) %>%
+  full_join(mensaliza_uc(cc) %>% rename(consumo_mensal_cc = consumo_mensal),
+            by = c("UF","ESTRATO_POF","COD_UPA","NUM_DOM","NUM_UC")) %>%
+  transmute(
+    UF, ESTRATO_POF, COD_UPA, NUM_DOM, NUM_UC,
+    consumo_total_uc = coalesce(consumo_mensal_dc, 0) +
+                       coalesce(consumo_mensal_di, 0) +
+                       coalesce(consumo_mensal_cc, 0)
+  )
+
+
+# 5) Base final do exercício (base_uc) + percentis de renda
+
+base_uc <- mor_uc %>%
+  inner_join(dom_base, by = c("UF","ESTRATO_POF","COD_UPA","NUM_DOM")) %>%
+  left_join(rt_uc,   by = c("UF","ESTRATO_POF","COD_UPA","NUM_DOM","NUM_UC")) %>%
+  left_join(cons_uc, by = c("UF","ESTRATO_POF","COD_UPA","NUM_DOM","NUM_UC")) %>%
+  mutate(
+    renda_trabalho_uc = ifelse(is.na(renda_trabalho_uc), 0, renda_trabalho_uc),
+    consumo_total_uc  = ifelse(is.na(consumo_total_uc),  0, consumo_total_uc),
+    p_renda = weighted_percentile_rank(renda_total_uc, peso_final)
+  ) %>%
+  filter(
+    is.finite(peso_final), peso_final > 0,
+    is.finite(renda_total_uc), renda_total_uc >= 0,
+    !is.na(p_renda)
+  )
+
+des_uc <- base_uc %>%
+  as_survey_design(ids = COD_UPA, strata = ESTRATO_POF, weights = peso_final, nest = TRUE)
+
+
+```
+
+
+
+# Tarefa 1: Distribuição da renda do trabalho por região
+
+Nesta tarefa, os dados de `base_uc` **não são multiplicados** pelos pesos amostrais para “criar mais linhas”. O que acontece é que os pesos (`peso_final`) entram **apenas na hora de construir os gráficos**, para que cada UC tenha uma influência proporcional ao tamanho do grupo da população que ela representa. Se o peso é maior, aquela UC “conta mais” no desenho do gráfico; se o peso é menor, “conta menos”. Isso é importante porque a POF é uma amostra e, sem pesos, o gráfico pode representar de forma incorreta o Brasil.
+
+O primeiro gráfico é uma **densidade ponderada**. Ele é um jeito de mostrar a distribuição da renda do trabalho como uma **curva suave**. Quando a curva é mais alta em um ponto, isso significa que existe **maior concentração de UCs** com renda do trabalho perto daquele valor. Como o gráfico é ponderado, essa concentração é calculada considerando os pesos: a curva descreve “onde está a maior parte da população”, e não apenas “onde está a maior parte da amostra”.
+
+O segundo gráfico é um **histograma ponderado**. Ele divide a renda em faixas (barras) e mostra **quanta população** está em cada faixa. De novo, “quanta população” aqui é aproximado com pesos: cada UC contribui para a altura da barra de acordo com `peso_final`. Por isso o eixo y é uma **frequência ponderada**, isto é, uma contagem ajustada para representar o total populacional.
+
+O corte no percentil 99 (p99) existe porque rendas muito altas são raras, mas podem “esticar” o eixo x e deixar o restante do histograma achatado e difícil de ler. Ao cortar no p99, o gráfico foca no intervalo em que está **quase toda a população (99%)**, facilitando comparar o “miolo” da distribuição entre as regiões.
+
+Em termos práticos, esses gráficos permitem observar, para cada região, (i) onde a renda do trabalho se concentra, (ii) se a maior parte da população está em rendas mais baixas ou mais altas e (iii) se a distribuição é mais “espalhada” ou mais “concentrada”, sempre com interpretação voltada à população brasileira por causa do uso dos pesos.
+
+```{r tarefa_1, message=FALSE, warning=FALSE}
+# Tarefa 1: Distribuição da renda do trabalho por região
+
+df1 <- base_uc %>%
+  filter(!is.na(regiao)) %>%
+  filter(is.finite(renda_trabalho_uc), renda_trabalho_uc >= 0) %>%
+  mutate(regiao = factor(regiao, levels = c("Norte","Nordeste","Sudeste","Sul","Centro-Oeste")))
+
+# Densidade ponderada por região
+ggplot(df1, aes(x = renda_trabalho_uc, weight = peso_final)) +
+  geom_density(adjust = 1.1) +
+  facet_wrap(~ regiao, scales = "free_x") +
+  labs(
+    title = "Distribuição da renda do trabalho mensal (R$) por região",
+    x = "Renda do trabalho mensal (R$), UC",
+    y = "Densidade ponderada"
+  )
+
+# Quantil ponderado p99 
+p99 <- {
+  aux <- df1 %>% filter(is.finite(renda_trabalho_uc), is.finite(peso_final), peso_final > 0) %>%
+    arrange(renda_trabalho_uc)
+  cw <- cumsum(aux$peso_final) / sum(aux$peso_final)
+  aux$renda_trabalho_uc[which(cw >= 0.99)[1]]
+}
+
+# Histograma ponderado por região (corte no p99)
+ggplot(df1 %>% filter(renda_trabalho_uc <= p99), aes(x = renda_trabalho_uc, weight = peso_final)) +
+  geom_histogram(bins = 60) +
+  facet_wrap(~ regiao, scales = "free_x") +
+  labs(
+    title = "Histograma ponderado da renda do trabalho mensal (corte no p99)",
+    x = "Renda do trabalho mensal (R$), UC",
+    y = "Frequência ponderada"
+  )
+
+```
+
+# Tarefa 2: Distribuição do consumo total por região
+
+Aqui, o consumo total mensal da UC (`consumo_total_uc`) é comparado entre as cinco grandes regiões (`regiao`). Os gráficos usam `peso_final` apenas como **peso de ponderação**, para que a distribuição represente a população brasileira: UCs com peso maior têm maior influência no desenho das curvas e das barras.
+
+O primeiro gráfico é uma **densidade ponderada**: uma curva suavizada que mostra onde o consumo se concentra em cada região. Picos mais altos indicam que uma parcela maior da população está em torno daquele nível de consumo, e a ponderação garante que esse “tamanho” seja populacional, não apenas da amostra.
+
+O segundo gráfico é um **histograma ponderado**: barras por faixas de consumo, em que a altura representa a quantidade de população em cada faixa (via pesos). Para o gráfico ficar legível, ele é cortado no **percentil 99 ponderado** do consumo, evitando que poucos valores muito altos distorçam a escala e escondam o padrão do restante da distribuição.
+
+
+```{r tarefa_2, message=FALSE, warning=FALSE}
+# Tarefa 2: Distribuição do consumo total por região
+
+df2 <- base_uc %>%
+  filter(!is.na(regiao)) %>%
+  filter(is.finite(consumo_total_uc), consumo_total_uc >= 0) %>%
+  mutate(regiao = factor(regiao, levels = c("Norte","Nordeste","Sudeste","Sul","Centro-Oeste")))
+
+# Densidade ponderada por região
+ggplot(df2, aes(x = consumo_total_uc, weight = peso_final)) +
+  geom_density(adjust = 1.1) +
+  facet_wrap(~ regiao, scales = "free_x") +
+  labs(
+    title = "Distribuição do consumo total mensal (R$) por região",
+    x = "Consumo total mensal (R$), UC",
+    y = "Densidade ponderada"
+  )
+
+# Quantil ponderado p99
+p99_c <- {
+  aux <- df2 %>%
+    filter(is.finite(consumo_total_uc), is.finite(peso_final), peso_final > 0) %>%
+    arrange(consumo_total_uc)
+  cw <- cumsum(aux$peso_final) / sum(aux$peso_final)
+  aux$consumo_total_uc[which(cw >= 0.99)[1]]
+}
+
+# Histograma ponderado por região (corte no p99)
+ggplot(df2 %>% filter(consumo_total_uc <= p99_c), aes(x = consumo_total_uc, weight = peso_final)) +
+  geom_histogram(bins = 60) +
+  facet_wrap(~ regiao, scales = "free_x") +
+  labs(
+    title = "Histograma ponderado do consumo total mensal (corte no p99)",
+    x = "Consumo total mensal (R$), UC",
+    y = "Frequência ponderada"
+  )
+
+```
+
+
+# Tarefa 3: Taxa de consumo ao longo dos percentis de renda
+
+Nesta tarefa, o objetivo é descrever como a razão entre consumo e renda muda quando se caminha do percentil 1 ao 100 da renda total. A análise é feita no nível da Unidade de Consumo (UC) e usa quatro variáveis já prontas na `base_uc`: `consumo_total_uc` (consumo mensal), `renda_total_uc` (renda mensal), `p_renda` (percentil ponderado de renda) e `peso_final` (peso amostral). Os pesos entram apenas para que os resultados representem a população, isto é, UCs com maior `peso_final` têm maior influência nos resumos.
+
+A variável de interesse é `taxa_consumo = consumo_total_uc / renda_total_uc`. Ela indica, de forma direta, quanto a UC consumiu no mês em relação à renda do mês. A tarefa é descritiva e não mede efeito causal, apenas mostra padrões ao longo da distribuição de renda.
+
+Para a taxa ser bem definida, o código restringe a amostra a UCs com `renda_total_uc > 0`, além de manter apenas valores finitos e pesos positivos. Depois, dentro de cada percentil de renda (`p_renda`), o código resume a distribuição da `taxa_consumo` usando quantis ponderados (25%, 50% e 75%).
+
+A função `wtd_q(x, w, p)` é o mecanismo que calcula esses quantis ponderados. Nela, `x` é a variável que se quer resumir (aqui, a própria `taxa_consumo`), `w` é o vetor de pesos amostrais associado a cada observação (aqui, `peso_final`), e `p` é o percentil desejado em escala de 0 a 1 (por exemplo, `0.25` para o 25%, `0.50` para a mediana e `0.75` para o 75%). O que a função faz, em termos simples, é ordenar `x` do menor para o maior, acumular os pesos `w` nessa mesma ordem e identificar o ponto em que a soma acumulada dos pesos atinge a fração `p` do total. O valor de `x` nesse ponto é o “quantil ponderado”, isto é, o quantil calculado como se cada observação representasse `w` unidades da população.
+
+O resultado por percentil de renda é um conjunto de três curvas: `q50` (mediana ponderada da taxa) e, ao redor, `q25` e `q75` (limites do intervalo interquartil). No gráfico, o eixo x é `p_renda` (posição na distribuição de renda) e o eixo y é a `taxa_consumo`. A linha central mostra o padrão típico da taxa em cada faixa de renda e a faixa sombreada mostra o quanto as UCs variam dentro de cada percentil.
+
+
+```{r tarefa_3, message=FALSE, warning=FALSE}
+# Tarefa 3: taxa_consumo = consumo_total / renda_total; distribuição por percentil de renda total
+
+# Quantil ponderado simples (sem pacote extra)
+wtd_q <- function(x, w, p) {
+  ok <- is.finite(x) & is.finite(w) & w > 0
+  x <- x[ok]; w <- w[ok]
+  if (length(x) == 0) return(NA_real_)
+  ord <- order(x)
+  x <- x[ord]; w <- w[ord]
+  cw <- cumsum(w) / sum(w)
+  x[which(cw >= p)[1]]
+}
+
+df3 <- base_uc %>%
+  filter(is.finite(consumo_total_uc), is.finite(renda_total_uc), renda_total_uc > 0) %>%
+  mutate(taxa_consumo = consumo_total_uc / renda_total_uc) %>%
+  filter(is.finite(taxa_consumo), is.finite(peso_final), peso_final > 0, !is.na(p_renda))
+
+summ_p <- df3 %>%
+  group_by(p_renda) %>%
+  summarise(
+    q25 = wtd_q(taxa_consumo, peso_final, 0.25),
+    q50 = wtd_q(taxa_consumo, peso_final, 0.50),
+    q75 = wtd_q(taxa_consumo, peso_final, 0.75),
+    n_uc = n(),
+    .groups = "drop"
+  )
+
+ggplot(summ_p, aes(x = p_renda, y = q50)) +
+  geom_ribbon(aes(ymin = q25, ymax = q75), alpha = 0.25) +
+  geom_line() +
+  labs(
+    title = "Taxa de consumo (consumo_total / renda_total) por percentil de renda total",
+    x = "Percentil ponderado de renda total (UC)",
+    y = "Taxa de consumo (mediana e intervalo interquartil)"
+  )
+
+
+```
+
+
+O gráfico mostra como a taxa de consumo (consumo dividido pela renda) muda ao longo dos grupos de renda, do mais pobre ao mais rico. Nos percentis mais baixos, essa taxa é maior, ou seja, essas famílias gastam uma parte maior da renda no consumo. Conforme a renda aumenta, a taxa cai, indicando que os mais ricos consomem uma parcela menor da renda. A área cinza mostra que, entre os mais pobres, essa taxa varia mais de família para família.
+
+
+# Tarefa 4: Taxa de consumo no subgrupo com `idade_max < 50`
+
+Esta tarefa repete a análise da taxa de consumo, mas agora usando apenas as UCs em que a pessoa mais velha tem menos de 50 anos. A única mudança substantiva em relação à tarefa anterior é a introdução do filtro na variável `idade_max`, que define o subgrupo: entram apenas as observações com `idade_max` finita e `idade_max < 50`.
+
+Depois de restringir o banco, a variável `taxa_consumo` é calculada do mesmo modo, como `consumo_total_uc / renda_total_uc`, mantendo a condição `renda_total_uc > 0` para evitar divisão por zero e mantendo apenas pesos amostrais positivos (`peso_final > 0`) para que os resumos representem a população desse subgrupo.
+
+A segunda diferença importante é que os percentis de renda são recalculados dentro do próprio subgrupo. Em vez de usar `p_renda` (que ordena a renda na população inteira), o código cria `p_renda_sub = weighted_percentile_rank(renda_total_uc, peso_final)`. Isso altera o sentido do eixo x: o percentil 50, por exemplo, passa a significar “mediana de renda entre as UCs com `idade_max < 50`”, e não a mediana de renda do Brasil todo.
+
+Em seguida, para cada percentil interno (`p_renda_sub` de 1 a 100), o código resume a distribuição da `taxa_consumo` usando quantis ponderados: `q25`, `q50` (mediana) e `q75`, sempre com `peso_final`. Aqui, `wtd_q(x, w, p)` é aplicado com `x = taxa_consumo`, `w = peso_final` e `p = 0.25, 0.50, 0.75`. Assim, os quantis são calculados como se cada UC “contasse” proporcionalmente ao número de UCs que ela representa na população.
+
+O gráfico final mostra a mediana ponderada da `taxa_consumo` ao longo dos percentis de renda do subgrupo, e a faixa entre `q25` e `q75` mostra a dispersão típica dentro de cada percentil. A leitura esperada é comparar como o padrão consumo/renda se comporta ao longo da distribuição de renda entre UCs mais jovens, sem interpretar como comparação direta com a mesma faixa de renda do total da população, já que os percentis foram redefinidos dentro do recorte etário.
+
+
+```{r tarefa_4, message=FALSE, warning=FALSE}
+
+# Quantil ponderado simples (sem pacote extra)
+wtd_q <- function(x, w, p) {
+  ok <- is.finite(x) & is.finite(w) & w > 0
+  x <- x[ok]; w <- w[ok]
+  if (length(x) == 0) return(NA_real_)
+  ord <- order(x)
+  x <- x[ord]; w <- w[ord]
+  cw <- cumsum(w) / sum(w)
+  x[which(cw >= p)[1]]
+}
+
+df4 <- base_uc %>%
+  filter(is.finite(idade_max), idade_max < 50) %>%
+  filter(is.finite(consumo_total_uc), is.finite(renda_total_uc), renda_total_uc > 0) %>%
+  filter(is.finite(peso_final), peso_final > 0) %>%
+  mutate(taxa_consumo = consumo_total_uc / renda_total_uc) %>%
+  filter(is.finite(taxa_consumo)) %>%
+  mutate(p_renda_sub = weighted_percentile_rank(renda_total_uc, peso_final)) %>%
+  filter(!is.na(p_renda_sub))
+
+summ_p4 <- df4 %>%
+  group_by(p_renda_sub) %>%
+  summarise(
+    q25 = wtd_q(taxa_consumo, peso_final, 0.25),
+    q50 = wtd_q(taxa_consumo, peso_final, 0.50),
+    q75 = wtd_q(taxa_consumo, peso_final, 0.75),
+    n_uc = n(),
+    .groups = "drop"
+  )
+
+ggplot(summ_p4, aes(x = p_renda_sub, y = q50)) +
+  geom_ribbon(aes(ymin = q25, ymax = q75), alpha = 0.25) +
+  geom_line() +
+  labs(
+    title = "Taxa de consumo por percentil de renda total: famílias com pessoa mais velha < 50 anos",
+    x = "Percentil ponderado de renda total (UC), recálculo dentro do subgrupo",
+    y = "Taxa de consumo (mediana e intervalo interquartil)"
+  )
+
+
+```
+
+# Tarefa 5: Taxa de consumo no subgrupo com `idade_max ≥ 65`
+
+Esta tarefa repete a análise da taxa de consumo, mas agora usando apenas as UCs em que a pessoa mais velha tem menos de 50 anos. A única mudança substantiva em relação à tarefa anterior é a introdução do filtro na variável `idade_max`, que define o subgrupo: entram apenas as observações com `idade_max` finita e `idade_max < 50`.
+
+Depois de restringir o banco, a variável `taxa_consumo` é calculada do mesmo modo, como `consumo_total_uc / renda_total_uc`, mantendo a condição `renda_total_uc > 0` para evitar divisão por zero e mantendo apenas pesos amostrais positivos (`peso_final > 0`) para que os resumos representem a população desse subgrupo.
+
+A segunda diferença importante é que os percentis de renda são recalculados dentro do próprio subgrupo. Em vez de usar `p_renda` (que ordena a renda na população inteira), o código cria `p_renda_sub = weighted_percentile_rank(renda_total_uc, peso_final)`. Isso altera o sentido do eixo x: o percentil 50, por exemplo, passa a significar “mediana de renda entre as UCs com `idade_max < 50`”, e não a mediana de renda do Brasil todo.
+
+Em seguida, para cada percentil interno (`p_renda_sub` de 1 a 100), o código resume a distribuição da `taxa_consumo` usando quantis ponderados: `q25`, `q50` (mediana) e `q75`, sempre com `peso_final`. Aqui, `wtd_q(x, w, p)` é aplicado com `x = taxa_consumo`, `w = peso_final` e `p = 0.25, 0.50, 0.75`. Assim, os quantis são calculados como se cada UC “contasse” proporcionalmente ao número de UCs que ela representa na população.
+
+O gráfico final mostra a mediana ponderada da `taxa_consumo` ao longo dos percentis de renda do subgrupo, e a faixa entre `q25` e `q75` mostra a dispersão típica dentro de cada percentil. A leitura esperada é comparar como o padrão consumo/renda se comporta ao longo da distribuição de renda entre UCs mais jovens, sem interpretar como comparação direta com a mesma faixa de renda do total da população, já que os percentis foram redefinidos dentro do recorte etário.
+
+
+```{r tarefa_5, message=FALSE, warning=FALSE}
+
+# Quantil ponderado simples (sem pacote extra)
+wtd_q <- function(x, w, p) {
+  ok <- is.finite(x) & is.finite(w) & w > 0
+  x <- x[ok]; w <- w[ok]
+  if (length(x) == 0) return(NA_real_)
+  ord <- order(x)
+  x <- x[ord]; w <- w[ord]
+  cw <- cumsum(w) / sum(w)
+  x[which(cw >= p)[1]]
+}
+
+df5 <- base_uc %>%
+  filter(is.finite(idade_max), idade_max >= 65) %>%
+  filter(is.finite(consumo_total_uc), is.finite(renda_total_uc), renda_total_uc > 0) %>%
+  filter(is.finite(peso_final), peso_final > 0) %>%
+  mutate(taxa_consumo = consumo_total_uc / renda_total_uc) %>%
+  filter(is.finite(taxa_consumo)) %>%
+  mutate(p_renda_sub = weighted_percentile_rank(renda_total_uc, peso_final)) %>%
+  filter(!is.na(p_renda_sub))
+
+summ_p5 <- df5 %>%
+  group_by(p_renda_sub) %>%
+  summarise(
+    q25 = wtd_q(taxa_consumo, peso_final, 0.25),
+    q50 = wtd_q(taxa_consumo, peso_final, 0.50),
+    q75 = wtd_q(taxa_consumo, peso_final, 0.75),
+    n_uc = n(),
+    .groups = "drop"
+  )
+
+ggplot(summ_p5, aes(x = p_renda_sub, y = q50)) +
+  geom_ribbon(aes(ymin = q25, ymax = q75), alpha = 0.25) +
+  geom_line() +
+  labs(
+    title = "Taxa de consumo por percentil de renda total: famílias com pessoa mais velha ≥ 65 anos",
+    x = "Percentil ponderado de renda total (UC), recálculo dentro do subgrupo",
+    y = "Taxa de consumo (mediana e intervalo interquartil)"
+  )
+
+```
+
